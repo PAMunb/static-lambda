@@ -197,7 +197,6 @@ def check_args(myargs):
             elif (arg == '--all' or (('--add' not in sys.argv)
                                      and ('--reset' not in sys.argv))):
                 reset()
-                print("yoo")
                 myargs["run_all"] = True
 
             i += 1
