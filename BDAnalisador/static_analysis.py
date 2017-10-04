@@ -1,255 +1,245 @@
 #!/usr/bin/python
-#
-#  Script to automatically get last commit of each project
-#  for each month until early 2013 and run static_analysis
-#  project over it and then generate the output folders.
-#
-#  Execute:
-#  python static_analysis.py <option> -path <projects_path>
-#
-#  When <options> are not defined, it runs everything. If options are defined:
-#    --reset
-#    --add
-#    --all
+# Script that can list and clone most popular git repositories. 
+# In the end, it also generates a temporary input file so static_analysis.py
+# can work with it.
+#   1. List repositories
+#   2. Clone Repositories
+#   3. Use sloc and save information
+#   4. Create file
 
 
+import requests
 import csv
 import os
-import shutil
 import sys
-from create_input import CreateInput
+from os import listdir, remove, system
+from os.path import isdir, abspath
 from subprocess import call
 
 
-fname = os.getcwd() + '/input_temp.csv'
-inputs_path = os.getcwd() + '/input/'
-output_path = os.getcwd() + '/output/'
-projects_dir = ''
+class CreateInput():
+    def __init__ (self, projects_dir, lang="Java", 
+                n_proj=100, n_stars=200):
 
-# jar with static analysis
-static_jar = os.getcwd() + '/static2.jar'
-final_input = os.getcwd() + "/input.csv"
+        self.lang = lang
+        self.projects_file = "{}.projects".format(self.lang)
+        self.n_projects = n_proj
+        self.n_stars = n_stars
+        self.projects_dir = projects_dir
 
-
-############################################################################
-
-
-def run_static_analysis(month_input_path):
-    os.system('java -jar {} {}'.format(static_jar, month_input_path))
-
-
-def add_final_input(month_input):
-    output = open(final_input, 'a')
-
-    with open(month_input, "r") as bFile:
-        projects = csv.reader(bFile, delimiter=";")
-        for row in projects:
-            output.write("{};{};{};{};{};{};{};\n".format(row[0],
-                        row[1], row[2], row[3], row[4], row[5], row[6]))
-
-    output.close()
+    def __git_to_https(url_name):
+        try:
+            new_url = url_name[3:]
+            new_url = 'https' + new_url
+            return new_url
+        except:
+            print ("Error: url'{}' in wrong format or does not exist.\
+                \n".format(new_url))
 
 
-def find_project(project_name_key, sloc_fp):
-    aFile = file(sloc_fp, "r")
-    reader = csv.reader(aFile)
+    def list_repositories(self):
+        prefix = 'https://api.github.com/search/repositories?q='
+        suffix = '&sort=self.stars&order=desc&page='
 
-    for row in reader:
-        projectName = row[0][:-4]
-        if (projectName == project_name_key):
-            if (row[1] != None and row[1] != "None"):
-                return row[1]
-            else:
-                return 0
-    aFile.close()
+        print ('\n# Listing github self.projects to use #')
 
-    return False
+        self.lang  = '+language:' + self.lang 
+        self.n_stars = 'stars:%3E'  + str(self.n_stars)
+        uri   = prefix + self.n_stars + self.lang + suffix
 
+        print ('searching the github API')
+        print ('query string: {}'.format(uri))
 
-def count_lines_code(month_input_path, temp_input_path, create_obj):
+        response = requests.get(uri + '1')
+        data = response.json()
+        items = data['items']
+        
+        f = open(self.projects_file, 'w')
+        pagination = 0
+        for item in items:
+            pagination += 1 
 
-    sloc_file_path = create_obj.count_code_lines()
-    vet = [0 for i in xrange(500)]
-    i = 0
+        pages = 1 + (self.n_projects / pagination)
+        
+        for i in range(1, pages):
+            print uri + str(i + 1)
+            response = requests.get(uri + str(i + 1))
+            data = response.json()
+            if(data.has_key('items')): 
+                items = items + data['items']
+            else: 
+                print data
+                break 
 
-    with open(temp_input_path, "r") as bFile:
-        projects = csv.reader(bFile, delimiter=";")
-        for project in projects:
-            vet[i] = find_project(project[2], sloc_file_path)
-            i += 1
-    bFile.close()
+        count = 0   
+        for item in items: 
+            if(count < self.n_projects and item != None):
+                line   = item.get("name", "-") + ","
+                line  += str(item.get("size", "-")) + "," 
+                line  += str(item.get("watchers", "-")) + "," 
+                line  += str(item.get("forks", "-")) + "," 
+                line  += item.get("git_url", "-") #+ "," 
+                #line  += item.get("description", "-")    
+                count += 1
+                f.write(line.encode('utf8') + '\n')
+            elif(count >= self.n_projects):  
+                break
 
-    i = 0
-    with open(temp_input_path, "r") as bFile:
-        projects = csv.reader(bFile, delimiter=";")
+        f.close()
+        print ('Number of projects: {}'.format(count))
 
-        output = open(month_input_path, 'w')
-
-        for project in projects:
-            output.write("{};{};{};{};{};{};{};\n".format(project[0],
-                    project[1], project[2], project[3], project[4], 
-                    vet[i], project[6]))
-            i += 1
-
-    bFile.close()
-    output.close()
-
-
-def is_non_zero_file(fpath):
-    return os.path.isfile(fpath) and os.path.getsize(fpath) > 0
-
-
-def change_input(date_after, date_before, create_obj):
-    global projects_dir
-
-    month_input = "{}input-{}_{}.csv".format(inputs_path, date_after, date_before)
-    temp_input_path = os.getcwd() + "/temp1.csv"
-
-    with open(fname, "r") as aFile:
-        projects = csv.reader(aFile, delimiter=";")
-        working_dir_saved = os.getcwd()
-        temp_input_file = open(temp_input_path, 'w')  # temp file for sloc
-
-        for project in projects:
-            path_project = "{}/".format(project[4])
-
-            # change working directory to project directory
-            os.chdir(path_project)
-            os.system('git log --after="{}" --before="{}" -1 \
-                --date=format:"%Y-%m-%d" --pretty=format:"%H, %an, %cd, %s" > temp.csv\
-                '.format(date_after, date_before))
-
-            if (is_non_zero_file(path_project + 'temp.csv')):
-
-                f = open('temp.csv', 'rt')
-                git_temp_rows = csv.reader(f)
-
-                for row in git_temp_rows:
-                    project[3] = row[0]
-
-                temp_input_file.write("{};{};{};{};{};{};{};\n".format(project[0],
-                            project[1], project[2], project[3], project[4], project[5], 
-                            row[2]))
-
-                f.close()
-
-                os.system("rm -r *")
-                os.system(
-                    "git archive --format=tar  {} | tar xf -".format(project[3]))
-
-        aFile.close()
-
-    os.chdir(working_dir_saved)
-    temp_input_file.close()
-
-    count_lines_code(month_input, temp_input_path, create_obj)
-    run_static_analysis(month_input)
-    add_final_input(month_input)
-
-    os.remove(temp_input_path)
-    os.remove("summary.csv")
+        #return (self.projects_file)
 
 
-def version_control(create_obj):
-    day = 01
-    month = 06
-    year = 2017
+    def clone_repos(self):
+        print('\n# Cloning listed repositories #')
+        input_file = self.projects_file
+        clone_dir = self.projects_dir
 
-    while (year > 2015):
-        date_before = str(year) + '-' + str(month) + '-' + str(day)
+        if not os.path.exists(clone_dir):
+            os.makedirs(clone_dir)
 
-        if (month > 1):
-            month -= 1
-        else:
-            month = 12
-            year -= 1
+        f = open(input_file, 'rt')
+        try:
+            reader = csv.reader(f)
+            for row in reader:
+                current_path = os.path.join(clone_dir, row[0])
+                os.system("mkdir {}".format(current_path))
+                if os.listdir(self.projects_dir):
+                    os.system('git clone {} {}'.format(row[4], current_path))
+                else:
+                    print ("Error: {}/{} is not an empty \
+                        repository.".format(clone_dir, row[0]))
+        except:
+            print("Error: Unexpected error happened while cloning repositories.")
+        finally:
+            f.close() 
 
-        date_after = str(year) + '-' + str(month) + '-' + str(day)
-        print("after {} & before {}".format(date_after, date_before))
-
-        change_input(date_after, date_before, create_obj)
-
-    os.remove(fname)
-
-
-def reset():
-    output = open(final_input, 'w')
-    output.close()
-
-    if (os.path.isdir(inputs_path)):
-        shutil.rmtree(inputs_path)
-
-    if (os.path.isdir(output_path)):
-        shutil.rmtree(output_path)
+        #return clone_dir
 
 
-def check_args(myargs):
+    #cloc.py
+    def count_code_lines(self):
+        print ('\n# Counting # of lines of projects #')
+
+        summary_file = "summary.csv"
+        projects_dir = self.projects_dir
+        sloc_dir = 'sloc/'
+        keepTempFiles = 'no'
+        files = listdir(projects_dir)
+
+        if not os.path.exists(sloc_dir):
+            os.makedirs(sloc_dir)
+
+        for f in files:
+            print (f)
+            print (projects_dir)
+            s = projects_dir + '/' + f 
+            if(isdir(s)):
+                system('cloc ' + s + ' --csv --out=' + sloc_dir + "/" + f + ".csv")
+
+        files = [f for f in listdir(sloc_dir) if f.endswith(".csv")]
+        fout = file(summary_file, "w")  
+                
+        for f in files:
+            fname = sloc_dir + '/' + f 
+            aFile = file(fname, "rt")
+            reader = csv.reader(aFile)
+            count = 0
+            base   = 0
+            other = 0
+            for row in reader:
+                if(count == 0): 
+                    row.insert(0, 'project')
+                else: 
+                    if(self.lang == 'C++' and (row[1] == "C++" or row[1].startswith("C/C++"))):
+                        base += int(row[4])
+                    elif(row[1] == self.lang):
+                        base += int(row[4]) 
+                    else: 
+                        other += int(row[4])
+                    row.insert(0, f)
+                count += 1
+            
+            writer = csv.writer(fout)
+            writer.writerow((f, base, other))
+            aFile.close()
+                                
+            if(keepTempFiles == 'no'): 
+                remove(fname)
+
+        fout.close()
+        os.rmdir(sloc_dir) 
+        return summary_file
+
+
+    def create_input(self):
+        print ('\n# Creating final input file #')
+
+        sloc_file = "summary.csv"
+        result_file = "input_temp.csv"
+
+        fout = file(result_file, "w")
+
+
+        aFile = file(sloc_file, "rt")
+        reader = csv.reader(aFile)
+
+        for row in reader:
+            project_name = row[0][:-4]
+            print project_name
+            cur_project_path = os.path.join(self.projects_dir, project_name)
+            # No version checking yet, default at 1 for now
+            fout.write(';;{};1;{};{};\n'.format(project_name, cur_project_path, row[1]))
+
+        return (result_file)        
+
+    def create(self):
+        self.list_repositories()
+        self.clone_repos()
+        self.count_code_lines()
+        self.create_input()
+
+
+def check_args(my_args):
     i = 0
     try:
         for arg in sys.argv:
-            if (arg == '-path'):
-                myargs["dir_path"] = sys.argv[i + 1]
-            elif (arg == '--reset'):
-                reset()
-            
-            elif (arg == '--add'):
-                pass
-            elif (arg == '--all' or (('--add' not in sys.argv)
-                                     and ('--reset' not in sys.argv))):
-                reset()
-                myargs["run_all"] = True
-
+            if (arg == '-p'):
+                my_args['dir_path'] = sys.argv[i+1] 
+            elif (arg == '-l'):
+                my_args['lang'] = sys.argv[i+1]
+            elif (arg == '-s'):
+                my_args['stars'] = int(sys.argv[i+1])
+            elif (arg == '-n'):
+                my_args['proj_count'] = int(sys.argv[i+1])
             i += 1
     except:
-        print ("\nError: An unexpected error happened. Did you pass valid arguments?")
+        print ("Error: An unexpected error happened.")
 
-    return myargs
-
-
-##########################################
-
-def create_dir():
-    if not os.path.exists(inputs_path):
-        os.makedirs(inputs_path)
-
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
+    
+    return my_args
 
 def main():
-    global projects_dir
-
     try:
         input = raw_input
     except NameError:
         pass
 
-    myargs = {"dir_path": "",
-              "lang": "Java",
-              "stars": 200,
-              "proj_count": 2,
-              "run_all": False
-              }
+    myargs = {"dir_path": "", 
+             "lang" : "Java", 
+             "stars" : 200,
+             "proj_count" : 100,
+            }
 
     myargs = check_args(myargs)
-       
-    try:
-        if (os.path.isdir(myargs["dir_path"])):
-            projects_dir = myargs["dir_path"]
-            c = CreateInput(myargs["dir_path"], myargs["lang"],
-                 myargs["proj_count"], myargs["stars"])
-            if myargs["run_all"]:
-                c.create()
-            else:
-                pass
 
-            create_dir()
-            version_control(c)
+    c = CreateInput(myargs["dir_path"], myargs["lang"], 
+                myargs["proj_count"], myargs["stars"])
 
-        else:
-            raise IOError 
-    except IOError:
-        print("\nError: A directory path for projects should be provided.")
+    c.create()
 
+###############################################
 
 if __name__ == '__main__':
     main()
